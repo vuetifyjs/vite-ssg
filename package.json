@@ -1,7 +1,11 @@
 {
-  "name": "vite-ssg",
+  "private": false,
+  "name": "@vuetify/vite-ssg",
   "description": "Server-side generation for Vite",
   "version": "0.17.1",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -24,10 +28,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/antfu/vite-ssg"
+    "url": "https://github.com/vuetifyjs/vite-ssg"
   },
-  "homepage": "https://github.com/antfu/vite-ssg",
-  "bugs": "https://github.com/antfu/vite-ssg/issues",
+  "homepage": "https://github.com/vuetifyjs/vite-ssg",
+  "bugs": "https://github.com/vuetifyjs/vite-ssg/issues",
   "files": [
     "dist",
     "bin",
