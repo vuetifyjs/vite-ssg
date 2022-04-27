@@ -45,6 +45,7 @@ export async function build(cliOptions: Partial<ViteSSGOptions> = {}) {
     formatting = 'none',
     crittersOptions = {},
     includedRoutes = DefaultIncludedRoutes,
+    onAfterClientBuild,
     onBeforePageRender,
     onPageRendered,
     onFinished,
@@ -68,6 +69,7 @@ export async function build(cliOptions: Partial<ViteSSGOptions> = {}) {
     },
     mode: config.mode,
   }) as RollupOutput
+  onAfterClientBuild?.()
 
   // server
   buildLog('Build for server...')

@@ -74,6 +74,8 @@ export interface ViteSSGOptions {
    */
   includedRoutes?: (routes: string[]) => Promise<string[]> | string[]
 
+  onAfterClientBuild?: () => void
+
   /**
    * Callback to be called before every page render.
    *
