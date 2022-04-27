@@ -2,7 +2,7 @@
   "private": false,
   "name": "@vuetify/vite-ssg",
   "description": "Server-side generation for Vite",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "publishConfig": {
     "access": "public"
   },
