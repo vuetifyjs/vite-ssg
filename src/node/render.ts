@@ -85,8 +85,13 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
   }
 
   const ssrManifest: Manifest = JSON.parse(await fs.readFile(join(out, 'ssr-manifest.json'), 'utf-8'))
-  let indexHTML = await fs.readFile(join(out, 'index.html'), 'utf-8')
-  indexHTML = rewriteScripts(indexHTML, script)
+  const indexHTML = await fs.readFile(join(ssgOut, 'index.html'), 'utf-8')
+    .catch(async() => {
+      let indexHTML = await fs.readFile(join(out, 'index.html'), 'utf-8')
+      indexHTML = rewriteScripts(indexHTML, script)
+      await fs.writeFile(join(ssgOut, 'index.html'), indexHTML, 'utf-8')
+      return indexHTML
+    })
 
   for (const route of routesPaths) {
     try {
