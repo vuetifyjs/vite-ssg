@@ -3,6 +3,7 @@ import chalk from 'chalk'
 import yargs from 'yargs'
 import { hideBin } from 'yargs/helpers'
 import { build } from './build'
+import { render } from './render'
 
 yargs(hideBin(process.argv))
   .scriptName('vite-ssg')
@@ -21,6 +22,14 @@ yargs(hideBin(process.argv))
       }),
     async(args) => {
       await build(args)
+    },
+  )
+  .command(
+    'render',
+    'Render SSG',
+    args => args,
+    async(args) => {
+      await render(args)
     },
   )
   .fail((msg, err, yargs) => {

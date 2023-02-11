@@ -1,0 +1,220 @@
+/* eslint-disable no-console */
+import { join, dirname, isAbsolute, parse, resolve } from 'path'
+import chalk from 'chalk'
+import fs from 'fs-extra'
+import { build as viteBuild, resolveConfig, ResolvedConfig } from 'vite'
+import { renderToString, SSRContext } from 'vue/server-renderer'
+import { JSDOM, VirtualConsole } from 'jsdom'
+import { RollupOutput } from 'rollup'
+import type { VitePluginPWAAPI } from 'vite-plugin-pwa'
+import { ViteSSGContext, ViteSSGOptions } from '../client'
+import { renderPreloadLinks } from './preload-links'
+import { buildLog, routesToPaths, getSize } from './utils'
+import { getCritters } from './critical'
+
+type CreateAppFactory = (client: boolean, routePath?: string) => Promise<ViteSSGContext<true> | ViteSSGContext<false>>
+
+interface Manifest {
+  [key: string]: string[]
+}
+
+function DefaultIncludedRoutes(paths: string[]) {
+  // ignore dynamic routes
+  return paths.filter(i => !i.includes(':') && !i.includes('*'))
+}
+
+export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
+  const mode = process.env.MODE || process.env.NODE_ENV || cliOptions.mode || 'production'
+  const config = await resolveConfig({}, 'build', mode)
+
+  const cwd = process.cwd()
+  const root = config.root || cwd
+  const ssgOut = join(root, '.vite-ssg-temp')
+  const outDir = config.build.outDir || 'dist'
+  const out = isAbsolute(outDir) ? outDir : join(root, outDir)
+
+  const {
+    script = 'sync',
+    mock = false,
+    entry = await detectEntry(root),
+    formatting = 'none',
+    crittersOptions = {},
+    includedRoutes = DefaultIncludedRoutes,
+    onBeforePageRender,
+    onPageRendered,
+    onFinished,
+    dirStyle = 'flat',
+    includeAllRoutes = false,
+  }: ViteSSGOptions = Object.assign({}, config.ssgOptions || {}, cliOptions)
+
+  const ssrEntry = await resolveAlias(config, entry)
+  const prefix = process.platform === 'win32' ? 'file://' : ''
+
+  const { createApp } = await import(join(prefix, ssgOut, `${parse(ssrEntry).name}.mjs`)) as { createApp: CreateAppFactory }
+
+  const { routes } = await createApp(false)
+
+  let routesPaths = includeAllRoutes
+    ? routesToPaths(routes)
+    : await includedRoutes(routesToPaths(routes))
+
+  // uniq
+  routesPaths = Array.from(new Set(routesPaths))
+
+  buildLog('Rendering Pages...', routesPaths.length)
+
+  const critters = crittersOptions !== false ? await getCritters(outDir, crittersOptions) : undefined
+  if (critters)
+    console.log(`${chalk.gray('[vite-ssg]')} ${chalk.blue('Critical CSS generation enabled via `critters`')}`)
+
+  if (mock) {
+    /*
+      remove manual `new VirtualConsole()`, as it did not forward the console correctly
+
+      https://github.com/jsdom/jsdom#virtual-consoles:
+      "By default, the JSDOM constructor will return an instance with a virtual console that forwards all its output to the Node.js console."
+    */
+    // const jsdom = new JSDOM('', { url: 'http://localhost' })
+    // // @ts-ignore
+    // global.window = jsdom.window
+    // Object.assign(global, jsdom.window) // FIXME: throws an error when using esm
+
+    // @ts-ignore
+    const jsdomGlobal = (await import('./jsdomGlobal')).default
+    jsdomGlobal()
+  }
+
+  const ssrManifest: Manifest = JSON.parse(await fs.readFile(join(out, 'ssr-manifest.json'), 'utf-8'))
+  let indexHTML = await fs.readFile(join(out, 'index.html'), 'utf-8')
+  indexHTML = rewriteScripts(indexHTML, script)
+
+  for (const route of routesPaths) {
+    try {
+      const relativeRouteFile = `${(route.endsWith('/') ? `${route}index` : route).replace(/^\//g, '')}.html`
+      const filename = dirStyle === 'nested'
+        ? join(route.replace(/^\//g, ''), 'index.html')
+        : relativeRouteFile
+
+      console.log(
+        `Page ${chalk.dim(`${outDir}/`)}${chalk.cyan(filename.padEnd(15, ' '))}`,
+      )
+
+      const appCtx = await createApp(false, route) as ViteSSGContext<true>
+      const { app, router, head, initialState } = appCtx
+
+      if (router) {
+        await router.push(route)
+        await router.isReady()
+      }
+
+      const transformedIndexHTML = (await onBeforePageRender?.(route, indexHTML, appCtx)) || indexHTML
+
+      const ctx: SSRContext = {}
+      const appHTML = await renderToString(app, ctx)
+
+      // need to resolve assets so render content first
+      const renderedHTML = renderHTML({ indexHTML: transformedIndexHTML, appHTML, initialState })
+
+      // create jsdom from renderedHTML
+      const jsdom = new JSDOM(renderedHTML)
+
+      // render current page's preloadLinks
+      renderPreloadLinks(jsdom.window.document, ctx.modules || new Set<string>(), ssrManifest)
+
+      // render head
+      head?.updateDOM(jsdom.window.document)
+
+      const html = jsdom.serialize()
+      let transformed = (await onPageRendered?.(route, html, appCtx)) || html
+      if (critters)
+        transformed = await critters.process(transformed)
+
+      const formatted = await format(transformed, formatting)
+
+      await fs.ensureDir(join(out, dirname(filename)))
+      await fs.writeFile(join(out, filename), formatted, 'utf-8')
+    }
+    catch (err: any) {
+      console.error(`${chalk.gray('[vite-ssg]')} ${chalk.red(`Error on page: ${chalk.cyan(route)}`)}\n${err.stack}`)
+    }
+  }
+
+  // await fs.remove(ssgOut)
+
+  // when `vite-plugin-pwa` is presented, use it to regenerate SW after rendering
+  const pwaPlugin: VitePluginPWAAPI = config.plugins.find(i => i.name === 'vite-plugin-pwa')?.api
+  if (pwaPlugin?.generateSW) {
+    buildLog('Regenerate PWA...')
+    await pwaPlugin.generateSW()
+  }
+
+  console.log(`\n${chalk.gray('[vite-ssg]')} ${chalk.green('Build finished.')}`)
+
+  await onFinished?.()
+
+  // ensure build process always exits
+  const waitInSeconds = 15
+  const timeout = setTimeout(() => {
+    console.log(`${chalk.gray('[vite-ssg]')} ${chalk.yellow(`Build process still running after ${waitInSeconds}s. There might be something misconfigured in your setup. Force exit.`)}`)
+    process.exit(0)
+  }, waitInSeconds * 1000)
+  timeout.unref() // don't wait for timeout
+}
+
+function rewriteScripts(indexHTML: string, mode?: string) {
+  if (!mode || mode === 'sync')
+    return indexHTML
+  return indexHTML.replace(/<script type="module" /g, `<script type="module" ${mode} `)
+}
+
+function renderHTML({ indexHTML, appHTML, initialState }: { indexHTML: string; appHTML: string; initialState: any }) {
+  const stateScript = initialState
+    ? `\n<script>window.__INITIAL_STATE__=${initialState}</script>`
+    : ''
+  return indexHTML
+    .replace(
+      '<div id="app"></div>',
+      `<div id="app" data-server-rendered="true">${appHTML}</div>${stateScript}`,
+    )
+}
+
+async function format(html: string, formatting: ViteSSGOptions['formatting']) {
+  if (formatting === 'minify') {
+    const htmlMinifier = await import('html-minifier')
+    return htmlMinifier.minify(html, {
+      collapseWhitespace: true,
+      caseSensitive: true,
+      collapseInlineTagWhitespace: false,
+      minifyJS: true,
+      minifyCSS: true,
+    })
+  }
+  else if (formatting === 'prettify') {
+    // @ts-ignore
+    const prettier = (await import('prettier/esm/standalone.mjs')).default
+    // @ts-ignore
+    const parserHTML = (await import('prettier/esm/parser-html.mjs')).default
+
+    return prettier.format(html, { semi: false, parser: 'html', plugins: [parserHTML] })
+  }
+  return html
+}
+
+async function detectEntry(root: string) {
+  // pick the first script tag of type module as the entry
+  const scriptSrcReg = /<script(?:.*?)src=["'](.+?)["'](?!<)(?:.*)\>(?:[\n\r\s]*?)(?:<\/script>)/img
+  const html = await fs.readFile(join(root, 'index.html'), 'utf-8')
+  const scripts = [...html.matchAll(scriptSrcReg)] || []
+  const [, entry] = scripts.find((matchResult) => {
+    const [script] = matchResult
+    const [, scriptType] = script.match(/.*\stype=(?:'|")?([^>'"\s]+)/i) || []
+    return scriptType === 'module'
+  }) || []
+  return entry || 'src/main.ts'
+}
+
+async function resolveAlias(config: ResolvedConfig, entry: string) {
+  const resolver = config.createResolver()
+  const result = await resolver(entry, config.root)
+  return result || join(config.root, entry)
+}
