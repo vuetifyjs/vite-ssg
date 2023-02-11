@@ -138,6 +138,16 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
 
       await fs.ensureDir(join(out, dirname(filename)))
       await fs.writeFile(join(out, filename), formatted, 'utf-8')
+
+      // cleanup
+      delete (app as any).config.errorHandler
+      delete (app as any).config.globalProperties
+      delete (app as any)._context.provides
+      delete (app as any)._context.components
+      delete (app as any)._context.mixins
+      delete (app as any)._context.config
+      delete (app as any)._context
+      delete (app as any)._component
     }
     catch (err: any) {
       console.error(`${chalk.gray('[vite-ssg]')} ${chalk.red(`Error on page: ${chalk.cyan(route)}`)}\n${err.stack}`)
