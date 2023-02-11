@@ -25,6 +25,7 @@ function DefaultIncludedRoutes(paths: string[]) {
 
 export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
   const mode = process.env.MODE || process.env.NODE_ENV || cliOptions.mode || 'production'
+  process.env.NODE_ENV = mode
   const config = await resolveConfig({}, 'build', mode)
 
   const cwd = process.cwd()
