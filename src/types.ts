@@ -1,6 +1,5 @@
-/* eslint-disable no-use-before-define */
 import type { App } from 'vue'
-import type { Router, RouteRecordRaw, RouterOptions as VueRouterOptions } from 'vue-router'
+import type { RouteRecordRaw, Router, RouterOptions as VueRouterOptions } from 'vue-router'
 import type { HeadClient } from '@vueuse/head'
 import type { Options as CrittersOptions } from 'critters'
 
@@ -118,8 +117,8 @@ export interface ViteSSGClientOptions {
 export type RouterOptions = PartialKeys<VueRouterOptions, 'history'> & { base?: string }
 
 // extend vite.config.ts
-declare module 'vite' {
-  interface UserConfig {
-    ssgOptions?: ViteSSGOptions
-  }
-}
+// declare module 'vite' {
+//   interface UserConfig {
+//     ssgOptions?: ViteSSGOptions
+//   }
+// }

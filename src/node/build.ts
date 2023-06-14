@@ -1,10 +1,11 @@
 /* eslint-disable no-console */
-import { join } from 'path'
+import { join } from 'node:path'
 import fs from 'fs-extra'
-import { build as viteBuild, resolveConfig, ResolvedConfig } from 'vite'
-import { RollupOutput } from 'rollup'
-import { ViteSSGOptions } from '../client'
-import { buildLog } from './utils'
+import type { ResolvedConfig } from 'vite'
+import { resolveConfig, build as viteBuild } from 'vite'
+import type { RollupOutput } from 'rollup'
+import chalk from 'chalk'
+import type { ViteSSGOptions } from '../client'
 
 export interface Manifest {
   [key: string]: string[]
@@ -27,7 +28,7 @@ export async function build(cliOptions: Partial<ViteSSGOptions> = {}) {
     await fs.remove(ssgOut)
 
   // client
-  buildLog('Build for client...')
+  console.log(`\n${chalk.gray('[vite-ssg]')} ${chalk.yellow('Build for client...')}`)
   await viteBuild({
     build: {
       ssrManifest: true,
@@ -42,7 +43,7 @@ export async function build(cliOptions: Partial<ViteSSGOptions> = {}) {
   onAfterClientBuild?.()
 
   // server
-  buildLog('Build for server...')
+  console.log(`\n${chalk.gray('[vite-ssg]')} ${chalk.yellow('Build for server...')}`)
   process.env.VITE_SSG = 'true'
   const ssrEntry = await resolveAlias(config, entry)
   await viteBuild({

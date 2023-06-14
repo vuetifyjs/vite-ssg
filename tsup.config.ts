@@ -5,6 +5,7 @@ export default <Options>{
     'src/index.ts',
     'src/client/single-page.ts',
     'src/node/cli.ts',
+    'src/node/renderWorker.ts',
   ],
   dts: true,
   splitting: true,

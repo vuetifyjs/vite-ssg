@@ -1,18 +1,17 @@
 /* eslint-disable no-console */
-import { join, dirname, isAbsolute, parse, resolve } from 'path'
+import { isAbsolute, join, parse } from 'node:path'
+import inspector from 'node:inspector'
+import os from 'node:os'
 import chalk from 'chalk'
 import fs from 'fs-extra'
-import { build as viteBuild, resolveConfig, ResolvedConfig } from 'vite'
-import { renderToString, SSRContext } from 'vue/server-renderer'
-import { JSDOM, VirtualConsole } from 'jsdom'
-import { RollupOutput } from 'rollup'
+import type { ResolvedConfig } from 'vite'
+import { resolveConfig } from 'vite'
 import type { VitePluginPWAAPI } from 'vite-plugin-pwa'
-import { ViteSSGContext, ViteSSGOptions } from '../client'
-import { renderPreloadLinks } from './preload-links'
-import { buildLog, routesToPaths, getSize } from './utils'
+import Piscina from 'piscina'
+import type { ViteSSGOptions } from '../client'
+import { routesToPaths } from './utils'
 import { getCritters } from './critical'
-
-type CreateAppFactory = (client: boolean, routePath?: string) => Promise<ViteSSGContext<true> | ViteSSGContext<false>>
+import type { CreateAppFactory, WorkerContext } from './renderWorker'
 
 interface Manifest {
   [key: string]: string[]
@@ -41,8 +40,8 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
     formatting = 'none',
     crittersOptions = {},
     includedRoutes = DefaultIncludedRoutes,
-    onBeforePageRender,
-    onPageRendered,
+    // onBeforePageRender,
+    // onPageRendered,
     onFinished,
     dirStyle = 'flat',
     includeAllRoutes = false,
@@ -50,8 +49,9 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
 
   const ssrEntry = await resolveAlias(config, entry)
   const prefix = process.platform === 'win32' ? 'file://' : ''
+  const ssrEntryPath = join(prefix, ssgOut, `${parse(ssrEntry).name}.mjs`)
 
-  const { createApp } = await import(join(prefix, ssgOut, `${parse(ssrEntry).name}.mjs`)) as { createApp: CreateAppFactory }
+  const { createApp } = await import(ssrEntryPath) as { createApp: CreateAppFactory }
 
   const { routes } = await createApp(false)
 
@@ -61,8 +61,6 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
 
   // uniq
   routesPaths = Array.from(new Set(routesPaths))
-
-  buildLog('Rendering Pages...', routesPaths.length)
 
   const critters = crittersOptions !== false ? await getCritters(outDir, crittersOptions) : undefined
   if (critters)
@@ -80,87 +78,48 @@ export async function render(cliOptions: Partial<ViteSSGOptions> = {}) {
     // global.window = jsdom.window
     // Object.assign(global, jsdom.window) // FIXME: throws an error when using esm
 
-    // @ts-ignore
+    // @ts-expect-error no types
     const jsdomGlobal = (await import('./jsdomGlobal')).default
     jsdomGlobal()
   }
 
   const ssrManifest: Manifest = JSON.parse(await fs.readFile(join(out, 'ssr-manifest.json'), 'utf-8'))
   const indexHTML = await fs.readFile(join(ssgOut, 'index.html'), 'utf-8')
-    .catch(async() => {
+    .catch(async () => {
       let indexHTML = await fs.readFile(join(out, 'index.html'), 'utf-8')
       indexHTML = rewriteScripts(indexHTML, script)
       await fs.writeFile(join(ssgOut, 'index.html'), indexHTML, 'utf-8')
       return indexHTML
     })
 
-  for (const route of routesPaths) {
-    try {
-      const relativeRouteFile = `${(route.endsWith('/') ? `${route}index` : route).replace(/^\//g, '')}.html`
-      const filename = dirStyle === 'nested'
-        ? join(route.replace(/^\//g, ''), 'index.html')
-        : relativeRouteFile
-
-      console.log(
-        `Page ${chalk.dim(`${outDir}/`)}${chalk.cyan(filename.padEnd(15, ' '))}`,
-      )
-
-      const appCtx = await createApp(false, route) as ViteSSGContext<true>
-      const { app, router, head, initialState } = appCtx
-
-      if (router) {
-        await router.push(route)
-        await router.isReady()
-      }
-
-      const transformedIndexHTML = (await onBeforePageRender?.(route, indexHTML, appCtx)) || indexHTML
-
-      const ctx: SSRContext = {}
-      const appHTML = await renderToString(app, ctx)
-
-      // need to resolve assets so render content first
-      const renderedHTML = renderHTML({ indexHTML: transformedIndexHTML, appHTML, initialState })
-
-      // create jsdom from renderedHTML
-      const jsdom = new JSDOM(renderedHTML)
-
-      // render current page's preloadLinks
-      renderPreloadLinks(jsdom.window.document, ctx.modules || new Set<string>(), ssrManifest)
-
-      // render head
-      head?.updateDOM(jsdom.window.document)
-
-      const html = jsdom.serialize()
-      let transformed = (await onPageRendered?.(route, html, appCtx)) || html
-      if (critters)
-        transformed = await critters.process(transformed)
-
-      const formatted = await format(transformed, formatting)
-
-      await fs.ensureDir(join(out, dirname(filename)))
-      await fs.writeFile(join(out, filename), formatted, 'utf-8')
-
-      // cleanup
-      delete (app as any).config.errorHandler
-      delete (app as any).config.globalProperties
-      delete (app as any)._context.provides
-      delete (app as any)._context.components
-      delete (app as any)._context.mixins
-      delete (app as any)._context.config
-      delete (app as any)._context
-      delete (app as any)._component
-    }
-    catch (err: any) {
-      console.error(`${chalk.gray('[vite-ssg]')} ${chalk.red(`Error on page: ${chalk.cyan(route)}`)}\n${err.stack}`)
-    }
-  }
+  const maxThreads = inspector.url() ? 1 : Math.max(1, Math.floor(Math.min(os.cpus().length / 2, os.freemem() / (1.1 * 1024 ** 3))))
+  console.log(`\n${chalk.gray('[vite-ssg]')} ${chalk.yellow('Rendering')} ${chalk.blue(routesPaths.length)} ${chalk.yellow('pages...')} ${chalk.gray(`(${maxThreads} threads)`)}`)
+  const pool = new Piscina({
+    filename: new URL('./renderWorker.mjs', import.meta.url).pathname,
+    niceIncrement: 10,
+    maxThreads,
+  })
+  await Promise.all(
+    routesPaths.map((route) => {
+      return pool.run({
+        route,
+        dirStyle,
+        outDir,
+        indexHTML,
+        formatting,
+        out,
+        ssrEntryPath,
+        ssrManifest,
+      } satisfies WorkerContext)
+    }),
+  )
 
   // await fs.remove(ssgOut)
 
   // when `vite-plugin-pwa` is presented, use it to regenerate SW after rendering
   const pwaPlugin: VitePluginPWAAPI = config.plugins.find(i => i.name === 'vite-plugin-pwa')?.api
   if (pwaPlugin?.generateSW) {
-    buildLog('Regenerate PWA...')
+    console.log(`\n${chalk.gray('[vite-ssg]')} ${chalk.yellow('Regenerate PWA...')}`)
     await pwaPlugin.generateSW()
   }
 
@@ -181,39 +140,6 @@ function rewriteScripts(indexHTML: string, mode?: string) {
   if (!mode || mode === 'sync')
     return indexHTML
   return indexHTML.replace(/<script type="module" /g, `<script type="module" ${mode} `)
-}
-
-function renderHTML({ indexHTML, appHTML, initialState }: { indexHTML: string; appHTML: string; initialState: any }) {
-  const stateScript = initialState
-    ? `\n<script>window.__INITIAL_STATE__=${initialState}</script>`
-    : ''
-  return indexHTML
-    .replace(
-      '<div id="app"></div>',
-      `<div id="app" data-server-rendered="true">${appHTML}</div>${stateScript}`,
-    )
-}
-
-async function format(html: string, formatting: ViteSSGOptions['formatting']) {
-  if (formatting === 'minify') {
-    const htmlMinifier = await import('html-minifier')
-    return htmlMinifier.minify(html, {
-      collapseWhitespace: true,
-      caseSensitive: true,
-      collapseInlineTagWhitespace: false,
-      minifyJS: true,
-      minifyCSS: true,
-    })
-  }
-  else if (formatting === 'prettify') {
-    // @ts-ignore
-    const prettier = (await import('prettier/esm/standalone.mjs')).default
-    // @ts-ignore
-    const parserHTML = (await import('prettier/esm/parser-html.mjs')).default
-
-    return prettier.format(html, { semi: false, parser: 'html', plugins: [parserHTML] })
-  }
-  return html
 }
 
 async function detectEntry(root: string) {
